@@ -235,6 +235,35 @@ The hero's class can be changed at the home directory using `rpg-cli class <name
 
 * The release binary for macOS [is not signed](https://github.com/facundoolano/rpg-cli/issues/27). To open it for the first time, right click on the binary and select "Open" from the menu.
 
+## Testing
+
+The `Dockerfile` in the root folder will setup a Ubuntu image to run rpg-cli, then execute a series
+of scripts to test the program.
+
+- "Seed" the dungeon
+  * Switch to Mage
+  * Until there are 20 Speed and 20 Power stones found:
+    + Descend slowly to level up
+    + Drop to level 6+ to die and drop loot
+    + Repeat
+  * Switch back to Fighter
+- Switch to Thief, gain 5 levels
+- Switch to Warrior, die to reset
+- Level up to 15 by descending slowly based on level
+- Go to each tombstone to collect loot, using stones as found
+- Equip Double Ring and Speed Ring
+- Level up to 120, buying sword/shield every 10 levels
+- Buy items to satisfy quests
+- Accomplish "End game" combat quests
+
+To run: With docker installed, run
+
+```
+docker build -t rpg-cli:test .
+# Note: add `-d` to run detatched mode
+docker run rpg-cli:test
+```
+
 ## Feedback appreciated!
 
 If you find any issue, have features ideas, gameplay suggestions or example shell scripts, feel free to [file an issue](https://github.com/facundoolano/rpg-cli/issues/new) to start a conversation.

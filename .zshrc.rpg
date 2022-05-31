@@ -1,0 +1,369 @@
+# Fun RPG-CLI integrations
+# Allow silent capture of stdout
+# example: FF=$(echo aaa|tee /dev/fd/5)
+DEBUG_RPG=0
+if [ $DEBUG_RPG -eq 1 ]; then
+  exec 5>&1
+else
+  exec 5>/dev/null
+fi
+step_counter=0
+death_ok=0
+ded=86
+latest_result=""
+alias rpg=rpg-cli
+alias rings_left="jq '.ring_pool | length ' ~/.rpg/data"
+alias quest_ez="jq -r '.tombstones | keys | sort_by(split(\"/\") | length) | first' ~/.rpg/data"
+alias quests="jq -r '.tombstones | keys_unsorted | length' ~/.rpg/data"
+
+# START Core Functions
+function rcd() {
+  step "rcd $@"
+  latest_result=$(rpg-cli cd "$@" | tee /dev/fd/5)
+  if [ -n "$(debug_check)" ]; then
+    echo "DEBUG TRIGGER $step_counter" >&2
+    exit 1
+  fi
+  if [ $death_ok -eq 0 ] && [ -n "$(echo "$latest_result" | grep -e "💀")" ]; then
+    echo "Hero died (rcd)" >&2
+    exit $ded
+  fi
+  builtin cd "$(rpg-cli pwd)"
+}
+
+function dn() {
+    current=$(basename $PWD)
+    number_re='^[0-9]+$'
+
+    if [[ $current =~ $number_re ]]; then
+        next=$(($current + 1))
+        mkdir -p $next
+        step "rpg-cli cd $next"
+        latest_result=$(rpg-cli cd $next | tee /dev/fd/5)
+    elif [[ -d 1 ]] ; then
+        step "rpg-cli cd 1"
+        latest_result=$(rpg-cli cd 1 | tee /dev/fd/5)
+    else
+        mkdir -p dungeon/1
+        step "rpg-cli cd dungeon"
+        latest_result=$(rpg-cli cd dungeon | tee /dev/fd/5)
+    fi
+    if [ -n "$(debug_check)" ]; then
+      echo "DEBUG TRIGGER $step_counter" >&2
+      exit 1
+    fi
+    if [ $death_ok -eq 0 ] && [ -n "$(echo "$latest_result" | grep -e "💀")" ]; then
+      echo "Hero died (dn)" >&2
+      exit $ded
+    fi
+    builtin cd "$(rpg-cli pwd)"
+    rls
+}
+
+function rb() {
+  [ -n "$1" ] && fights="$1" || fights=1
+  for i in `seq 1 $fights`; do
+    step "rb"
+    latest_result=$(rpg-cli battle | tee /dev/fd/5)
+    if [ -n "$(debug_check)" ]; then
+      echo "DEBUG TRIGGER $step_counter" >&2
+      exit 1
+    fi
+    if [ $death_ok -eq 0 ] && [ -n "$(echo "$latest_result" | grep -e "💀")" ]; then
+      echo "Hero died (rb)" >&2
+      exit $ded
+    fi
+  done
+}
+function rls() {
+  rpg-cli ls > /dev/fd/5
+}
+# END Core Functions
+
+# START Debug Functions
+function debug_check() {
+  # if [ $DEBUG_RPG -ne 0 ]; then
+  #   rings_ok
+  #   visited_home
+  # fi
+}
+
+function visited_home() {
+  echo $(grep -e "home" ~/.rpg/data)
+}
+
+function rings_ok() {
+  left=$(jq '.ring_pool | length' ~/.rpg/data)
+  dead=$(jq '.tombstones[].items[] | select(any(.type=="Ring";.))' ~/.rpg/data | grep "type" | wc -l)
+  carry=$(jq '.inventory | keys | map(select(endswith("-rng"))) | length' ~/.rpg/data)
+  if [ $((left+dead+carry)) -ne 19 ]; then
+    echo "Ring vanished"
+  fi
+}
+
+function step() {
+  if [ $DEBUG_RPG -ne 0 ]; then
+    cp ~/.rpg/data ~/.rpg/data_$step_counter
+    echo "$step_counter: $1" >> ~/.rpg/cmds
+    step_counter=$(((step_counter+1)%100))
+  fi
+}
+# END Debug functions
+# START Helper function
+function use_stones() {
+  [ -n "$1" ] && qty="$1" || qty=100
+  for i in `seq 1 $qty`; do
+    rpg-cli use hp-stone > /dev/null
+    rpg-cli use mp-stone > /dev/null
+    rpg-cli use spd-stone > /dev/null
+    rpg-cli use str-stone > /dev/null
+    rpg-cli use lvl-stone > /dev/null
+  done
+}
+function count_stones() {
+  [ -z "$1" ] && file="$HOME/.rpg/seeded" || file="$1"
+  for type in Level Power Health Magic Speed; do
+    qty=$(jq -r ".tombstones" $file | grep -e "$type" | wc -l)
+    echo "$type: $qty"
+  done
+}
+function fight_until() {
+  check=""
+  while [ -z "$check" ]; do
+    rb
+    if [ -n "$(echo "$latest_result" | grep -e "💀")" ]; then
+      return
+    fi
+    check="$(echo "$latest_result" | grep -e "$1")"
+  done
+}
+function kill_hero() {
+  step "(kill_hero)"
+  [ -n "$1" ] && start=$1 || start=4
+  for move in `seq 0 $start`; do
+    [ $(get_level) -eq 1 ] && break;
+    dn
+  done
+  while [ $(get_level) -ne 1 ]; do
+    dn
+    [ $(get_level) -eq 1 ] && break;
+    dn
+    [ $(get_level) -eq 1 ] && break;
+    fight_until 'level'
+  done
+  ascend
+}
+
+function check_quests() {
+  spd_stone_goal=20
+  pwr_stone_goal=20
+  keep_seeding=""
+  rings=$(rings_left)
+  spd_stones=$(jq '.tombstones' ~/.rpg/data | grep -e "Speed" | wc -l)
+  pwr_stones=$(jq '.tombstones' ~/.rpg/data | grep  -e "Power" | wc -l)
+  echo "Stones: Speed: $spd_stones/$spd_stone_goal | Power: $pwr_stones/$pwr_stone_goal" >&2
+  if [ $rings -eq 0 ] && [ $spd_stones -ge $spd_stone_goal ] && [ $pwr_stones -ge $pwr_stone_goal ]; then
+    keep_seeding="nope"
+  fi
+}
+
+function gear_up() {
+  rpg-cli use escape > /dev/null
+  rpg-cli buy shield > /dev/null
+  rpg-cli buy sword > /dev/null
+}
+
+function get_level() {
+  string="$(rpg-cli | grep -e "\[[0-9]*\]@")"
+  echo ${${string##*\[}%%\]*}
+}
+
+function get_max_floor() {
+  level="$(get_level)"
+  # max_floor=$((level*(.5+.45*level/120)))
+  max_floor=$((level-10))
+  [ $max_floor -lt 1 ] && max_floor=1
+  echo "${max_floor%%.*}"
+}
+function ascend() {
+  while [ "$(pwd)" != "$HOME" ]; do
+    rcd
+  done
+}
+function descend() {
+  [ -n "$1" ] && dest_floor=$1 || dest_floor=$(get_max_floor)
+  for cur_floor in `seq 0 $dest_floor`; do
+    dn
+    if [ -n "$(echo "$latest_result" | grep "💀")" ]; then
+      return
+    fi
+  done
+}
+function questmap() {
+  myquest=$(quest_ez)
+  full="$HOME/${myquest:2}"
+  mkdir -p $full
+  deep=$(basename $full)
+  echo "$full"
+
+  if [ -z "$1" ]; then
+    quest=${${myquest:2}%%/*}
+    rcd $quest
+    rls
+    while [ -n "$(ls)" ]; do
+      rcd `ls -d */ | head -1`
+      rls
+    done
+
+    ascend
+    rm -rf $quest
+  fi
+}
+function inn() {
+  [ -n "$1" ] && qty="$1" || qty=50
+  for i in `seq 1 $qty`; do
+    if [ $(quests) -gt 0 ]; then
+      questmap > /dev/null
+      if [ -n "$(echo "$latest_result" | grep "💀")" ]; then
+        echo "Hero Died on quest" >&2
+        exit
+      fi
+      # cd "$(rpg-cli pwd)"
+      use_stones 2
+    else
+      echo "No more quests, adventurer"
+      break
+    fi
+  done
+  echo "$(quests) quests left"
+}
+# END Helper functions
+# START Grind function
+function grind() {
+  [ -n "$1" ] && iterations=$1 || iterations=10
+  [ -n "$2" ] && depth=$2 || depth=2
+  for iteration in `seq 1 $iterations`; do
+    fol="quest"$RANDOM"_"$RANDOM
+    mkdir $fol
+    rcd $fol
+    rls
+    for deeper in `seq 1 $depth`; do
+      dn
+      if [ -n "$(echo "$latest_result" | grep -e "💀")" ]; then
+        break
+      fi
+    done
+    while [ "$(pwd)" != "$HOME" ]; do
+      rcd
+    done
+    rm -rf $fol
+  done
+}
+function slow_grind() {
+  # Will use "grind" until hero is at desired level, coming back to root after descent to "max_floor"
+  target=$1
+  echo "[31mGet hero to Level $target[0m"
+  while [ "$(get_level)" -lt $target ]; do
+    grind 1 $(get_max_floor) > /dev/null
+  done
+}
+function fast_grind() {
+  # Will descend to "max_floor" and fight there, descending as level increases and gearing up at lvl 20, 30, etc.
+  # don't do this under level 25...
+  max_level=$1
+  descend
+  while [ "$(get_level)" -lt $max_level ]; do
+    fight_until "level"
+    level=$(get_level)
+    if [ $((level%10)) -eq 0 ]; then
+      echo "ding $level"
+      gear_up
+      use_stones 10
+      descend
+    else
+      new_floor="$(get_max_floor)"
+      if [ $cur_floor -ne $new_floor ]; then
+        dn
+        cur_floor=$new_floor
+      fi
+    fi
+  done
+  gear_up
+}
+# END Grind function
+function seed_dungeon() {
+  echo "[31mSeeding dungeon[0m"
+  check_quests
+  rpg-cli class mage # mages r squishy and unlikely to survive multiple trips to level 6...
+  while [ -z "$keep_seeding" ]; do
+    for trip in `seq 1 10`; do
+      for depth in `seq 1 4`; do
+        grind 10 $depth
+      done
+      grind 10 6
+    done
+    if [ $(get_level) -gt 10 ]; then
+      kill_hero
+    fi
+    check_quests
+  done
+  kill_hero
+  cp ~/.rpg/data ~/.rpg/seeded
+  rpg-cli class warrior
+  count_stones
+}
+
+function playself() {
+  death_ok=1
+  echo "[31mGoal: Accomplish all TODO items[0m"
+  rpg-cli
+  seed_dungeon
+  echo "[31mGet to 5 with a Thief[0m"
+  rpg-cli class thief > /dev/null
+  kill_hero
+  slow_grind 6
+  echo "[31mReturn to Warrior[0m"
+  rpg-cli class warrior > /dev/null
+  kill_hero
+  slow_grind 15
+  rm -rf dungeon
+  death_ok=0
+  echo "[31mSeeking loot from tombstones[0m"
+  gear_up
+  while [ $(quests) -gt 0 ]; do
+    quest_ez
+    rpg-cli
+    inn 25
+  done
+  cp ~/.rpg/data ~/.rpg/quest-done
+  rpg-cli use double-rng &> /dev/null
+  rpg-cli use spd-rng > /dev/null
+  for i in `seq 1 100`; do
+    rpg-cli use lvl-stone > /dev/null
+  done
+  rpg-cli
+  gear_up
+  echo "[31mLeveling up to 120[0m"
+  fast_grind 120
+  rpg-cli buy diamond-ring &> /dev/null
+  echo "[31mSeeking Shadow[0m"
+  fight_until "shadow"
+  dn
+  gear_up
+  echo "[31mSeeking Dev[0m"
+  rcd ~/.rpg
+  fight_until "dev"
+  echo "[31mSeeking Gorthaur[0m"
+  for i in `seq 1 99`; do
+    dn
+  done
+  rpg-cli use double-rng > /dev/null
+  rpg-cli use ruling-rng > /dev/null
+  fight_until "gorthaur"
+  rpg-cli use ruling-rng > /dev/null
+  rpg-cli use double-rng > /dev/null
+  gear_up
+  rpg-cli todo
+}
+# End RPG-cli integrations
+
